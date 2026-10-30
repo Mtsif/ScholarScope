@@ -9,6 +9,7 @@ import hashlib
 import re
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import pandas as pd
@@ -269,7 +270,25 @@ with brand_title:
 st.caption('Researcher analytics · Google Scholar public-profile metrics')
 
 if 'profiles' not in st.session_state:
-    st.session_state.profiles = {}
+    # Load the example collection once per browser session, without sharing edits.
+    sample_path = Path(__file__).with_name('toy.json')
+    if sample_path.exists():
+        try:
+            class _LocalJSON:
+                def __init__(self, content):
+                    self.content = content
+
+                def getvalue(self):
+                    return self.content
+
+            st.session_state.profiles = read_uploaded_collection(
+                _LocalJSON(sample_path.read_bytes())
+            )
+        except (OSError, ValueError) as exc:
+            st.warning(f'Could not load toy.json: {exc}')
+            st.session_state.profiles = {}
+    else:
+        st.session_state.profiles = {}
 if 'loaded_upload_hash' not in st.session_state:
     st.session_state.loaded_upload_hash = None
 if 'dirty' not in st.session_state:
