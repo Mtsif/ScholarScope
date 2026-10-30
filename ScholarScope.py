@@ -1,11 +1,4 @@
-"""Google Scholar Researcher Metrics — Streamlit, direct public-profile reader.
 
-Run: streamlit run app.py
-Install: pip install streamlit pandas requests beautifulsoup4
-
-Google Scholar has no official public API; requests can be rate-limited or challenged.
-This app does not circumvent CAPTCHAs or access restrictions.
-"""
 import json
 import io
 import math
