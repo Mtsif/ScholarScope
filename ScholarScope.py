@@ -417,7 +417,7 @@ with st.sidebar:
         try:
             sid = get_id(profile_input)
             if sid in profiles:
-                st.info('This researcher is already in your collection. Use Refresh selected researcher to update their metrics.')
+                st.info('This researcher is already in your collection. Select the researcher in the Researcher profile tab and click Refresh metrics.')
             else:
                 with st.spinner('Retrieving researcher from Google Scholar…'):
                     new_profile = retrieve_profile(sid)
@@ -427,18 +427,6 @@ with st.sidebar:
         except (ValueError, RuntimeError, requests.RequestException) as exc:
             st.error(f'Could not add researcher: {exc}')
     if profiles:
-        if st.button('Refresh selected researcher', use_container_width=True):
-            # The selected profile picker is initialized later in the same sidebar.
-            sid = st.session_state.get('managed_researcher', next(iter(profiles)))
-            if sid not in profiles:
-                sid = next(iter(profiles))
-            try:
-                with st.spinner('Retrieving Google Scholar metrics…'):
-                    profiles[sid] = retrieve_profile(sid, profiles.get(sid))
-                st.session_state.dirty = True
-                st.success(f"Updated {profiles[sid]['name']}")
-            except (RuntimeError, requests.RequestException) as exc:
-                st.warning(f'{exc} Saved data retained.')
         if st.button('Refresh all researchers', use_container_width=True):
             updated, errors = 0, []
             progress = st.progress(0, text='Refreshing profiles…')
@@ -535,8 +523,14 @@ with profile_tab:
         st.info('Add a researcher or import a saved collection to view their profile.')
     else:
         st.subheader('Researcher profile')
-        chosen = st.selectbox('Select a researcher', list(profiles),
-                              format_func=lambda sid: profiles[sid].get('name', sid), key='researcher_detail')
+        selector_col, refresh_col = st.columns([5, 1], vertical_alignment='bottom')
+        with selector_col:
+            chosen = st.selectbox('Select a researcher', list(profiles),
+                                  format_func=lambda sid: profiles[sid].get('name', sid), key='researcher_detail')
+        with refresh_col:
+            refresh_clicked = st.button('↻ Refresh', key='refresh_profile_metrics',
+                                        use_container_width=True,
+                                        help='Update metrics for the selected researcher')
         profile = profiles[chosen]
         st.markdown(f"### {profile.get('name', chosen)}")
         if profile.get('affiliation'):
@@ -545,6 +539,18 @@ with profile_tab:
         c1.metric('Citations', formatted(profile.get('citations')))
         c2.metric('h-index', formatted(profile.get('h_index')))
         c3.metric('Publications', formatted(profile.get('publications')))
+        if refresh_clicked:
+            try:
+                with st.spinner('Retrieving Google Scholar metrics…'):
+                    profiles[chosen] = retrieve_profile(chosen, profiles.get(chosen))
+                st.session_state.dirty = True
+                st.session_state.profile_refresh_notice = ('success', 'Researcher metrics updated.')
+                st.rerun()
+            except (RuntimeError, requests.RequestException) as exc:
+                st.warning(f'Could not refresh metrics: {exc} Previous data retained.')
+        notice = st.session_state.pop('profile_refresh_notice', None)
+        if notice:
+            st.success(notice[1])
         annual = profile.get('annual_citations') or {}
         if annual:
             annual_data = pd.DataFrame([{'Year': int(y), 'Citations': int(v)}
