@@ -170,6 +170,106 @@ def fetch_profile(user_id: str) -> dict:
     }
 
 
+# SerpApi fallback: used when Google Scholar blocks direct profile retrieval.
+# The key is configured through Streamlit Cloud Secrets, never stored in Git.
+def serpapi_key():
+    try:
+        return st.secrets.get('SERPAPI_KEY', '')
+    except (FileNotFoundError, KeyError):
+        return ''
+
+
+def serpapi_search(user_id: str, start: int = 0) -> dict:
+    key = serpapi_key()
+    if not key:
+        raise RuntimeError('SERPAPI_KEY is missing. Set it in your deployed Streamlit app’s Secrets, save, and restart the app.')
+    response = requests.get(
+        'https://serpapi.com/search.json',
+        params={'engine': 'google_scholar_author', 'author_id': user_id,
+                'hl': 'en', 'start': start, 'num': 100, 'api_key': key},
+        timeout=35,
+    )
+    if response.status_code in (401, 403, 429):
+        raise RuntimeError(f'SerpApi refused the request (HTTP {response.status_code}); check API access or quota.')
+    response.raise_for_status()
+    payload = response.json()
+    if payload.get('error'):
+        raise RuntimeError('SerpApi error: ' + str(payload['error']))
+    return payload
+
+
+def serpapi_metric(table: list, prefix: str) -> tuple:
+    for entry in table:
+        for label, values in entry.items():
+            key = label.lower().replace(' ', '_').replace('-', '_')
+            if key.startswith(prefix) and isinstance(values, dict):
+                recent = next((v for k, v in values.items() if k != 'all'), None)
+                return values.get('all'), recent
+    return None, None
+
+
+def fetch_serpapi_profile(user_id: str) -> dict:
+    result = serpapi_search(user_id)
+    author = result.get('author') or {}
+    table = (result.get('cited_by') or {}).get('table') or []
+    citations, citations_recent = serpapi_metric(table, 'citation')
+    h_index, h_index_recent = serpapi_metric(table, 'h_index')
+    # SerpApi's author response may use the language-specific key 'indice_h'.
+    if h_index is None:
+        h_index, h_index_recent = serpapi_metric(table, 'indice_h')
+    if citations is None or h_index is None or not author.get('name'):
+        raise RuntimeError('SerpApi returned incomplete researcher data (name, citations or h-index missing). Check the Scholar ID and SerpApi API response.')
+
+    graph = (result.get('cited_by') or {}).get('graph') or []
+    annual = {str(item['year']): int(item['citations']) for item in graph
+              if str(item.get('year', '')).isdigit() and str(item.get('citations', '')).replace(',', '').isdigit()
+              for item in [{'year': item['year'], 'citations': str(item['citations']).replace(',', '')}]}
+
+    # One query can contain up to 100 publications; that is NOT necessarily
+    # a scholar's total. Avoid reporting truncated counts as exact totals.
+    articles = result.get('articles') or []
+    has_next = bool((result.get('serpapi_pagination') or {}).get('next'))
+    publication_count = len(articles) if not has_next and len(articles) < 100 else None
+
+    return {
+        'user_id': user_id, 'name': author['name'],
+        'affiliation': author.get('affiliations') or '',
+        'citations': int(citations),
+        'citations_recent': int(citations_recent) if citations_recent is not None else None,
+        'h_index': int(h_index),
+        'h_index_recent': int(h_index_recent) if h_index_recent is not None else None,
+        'publications': publication_count,
+        'annual_citations': annual,
+        'profile_url': f'https://scholar.google.com/citations?user={user_id}&hl=en',
+        'fetched_at': datetime.now(timezone.utc).isoformat(timespec='seconds'),
+        'source': 'Google Scholar via SerpApi',
+    }
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def cached_serpapi_profile(user_id: str) -> dict:
+    # Shared cache contains public author metrics only, never user collections.
+    return fetch_serpapi_profile(user_id)
+
+
+def retrieve_profile(user_id: str, previous: dict | None = None) -> dict:
+    try:
+        updated = fetch_profile(user_id)
+    except (RuntimeError, requests.RequestException) as direct_error:
+        try:
+            updated = cached_serpapi_profile(user_id)
+        except (RuntimeError, requests.RequestException, ValueError) as api_error:
+            raise RuntimeError(f'Direct Scholar lookup failed ({direct_error}); fallback failed ({api_error})') from api_error
+    if previous:
+        # Preserve a previously verified publication count if the limited
+        # SerpApi result cannot establish the full number.
+        if updated.get('publications') is None:
+            updated['publications'] = previous.get('publications')
+        if not updated.get('annual_citations'):
+            updated['annual_citations'] = previous.get('annual_citations') or {}
+    return updated
+
+
 # --- Presentation helpers --------------------------------------------------
 NAVY = '#14253D'
 BLUE = '#3277DB'
@@ -313,31 +413,19 @@ with st.sidebar:
                 st.success(f'Imported {len(imported)} researchers.')
     st.divider()
     profile_input = st.text_input('Google Scholar profile URL or ID', placeholder='Scholar profile link or ID')
-    researcher_name = st.text_input('Researcher name (optional)', placeholder='Name for your collection')
     if st.button('Add researcher', type='primary', use_container_width=True):
         try:
             sid = get_id(profile_input)
             if sid in profiles:
-                st.info('This researcher is already in your collection.')
+                st.info('This researcher is already in your collection. Use Refresh selected researcher to update their metrics.')
             else:
-                profiles[sid] = {
-                    'user_id': sid,
-                    'name': researcher_name.strip() or sid,
-                    'affiliation': '',
-                    'citations': None,
-                    'citations_recent': None,
-                    'h_index': None,
-                    'h_index_recent': None,
-                    'publications': None,
-                    'annual_citations': {},
-                    'profile_url': f'https://scholar.google.com/citations?user={sid}&hl=en',
-                    'fetched_at': None,
-                    'source': 'Not yet retrieved',
-                }
+                with st.spinner('Retrieving researcher from Google Scholar…'):
+                    new_profile = retrieve_profile(sid)
+                profiles[sid] = new_profile  # Save only verified, retrieved profiles.
                 st.session_state.dirty = True
-                st.success('Researcher added. Metrics can be refreshed separately.')
-        except ValueError as exc:
-            st.error(str(exc))
+                st.success(f"Added {new_profile['name']} with Google Scholar metrics.")
+        except (ValueError, RuntimeError, requests.RequestException) as exc:
+            st.error(f'Could not add researcher: {exc}')
     if profiles:
         if st.button('Refresh selected researcher', use_container_width=True):
             # The selected profile picker is initialized later in the same sidebar.
@@ -346,7 +434,7 @@ with st.sidebar:
                 sid = next(iter(profiles))
             try:
                 with st.spinner('Retrieving Google Scholar metrics…'):
-                    profiles[sid] = fetch_profile(sid)
+                    profiles[sid] = retrieve_profile(sid, profiles.get(sid))
                 st.session_state.dirty = True
                 st.success(f"Updated {profiles[sid]['name']}")
             except (RuntimeError, requests.RequestException) as exc:
@@ -358,13 +446,13 @@ with st.sidebar:
                 if i:
                     time.sleep(2)
                 try:
-                    profiles[sid] = fetch_profile(sid)
+                    profiles[sid] = retrieve_profile(sid, profiles.get(sid))
                     updated += 1
                     st.session_state.dirty = True
                 except (RuntimeError, requests.RequestException) as exc:
                     errors.append(f"{profiles[sid].get('name', sid)}: {exc}")
-                    if '429' in str(exc):
-                        st.warning('Google Scholar is rate-limiting requests. Refresh stopped to avoid further requests.')
+                    if 'fallback failed' in str(exc):
+                        st.warning('Both retrieval methods failed. Refresh stopped to avoid repeated requests.')
                         break
                 progress.progress((i + 1) / len(profiles), text=f'{i+1}/{len(profiles)} processed')
             st.info(f'Refreshed {updated} researcher(s).')
