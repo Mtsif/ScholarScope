@@ -1,0 +1,6 @@
+streamlit>=1.40,<2
+pandas>=2.2,<4
+requests>=2.31,<3
+beautifulsoup4>=4.12,<5
+plotly>=5.20,<7
+Pillow>=10,<14
