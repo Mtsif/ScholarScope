@@ -313,35 +313,66 @@ with st.sidebar:
                 st.success(f'Imported {len(imported)} researchers.')
     st.divider()
     profile_input = st.text_input('Google Scholar profile URL or ID', placeholder='Scholar profile link or ID')
-    if st.button('Add / update researcher', type='primary', use_container_width=True):
+    researcher_name = st.text_input('Researcher name (optional)', placeholder='Name for your collection')
+    if st.button('Add researcher', type='primary', use_container_width=True):
         try:
             sid = get_id(profile_input)
-            with st.spinner('Retrieving Google Scholar metrics…'):
-                profile = fetch_profile(sid)
-            profiles[sid] = profile
-            st.session_state.dirty = True
-            st.success(f"Updated {profile['name']}")
-        except (ValueError, RuntimeError, requests.RequestException) as exc:
-            st.error(str(exc))
-    if profiles and st.button('Refresh all researchers', use_container_width=True):
-        updated, errors = 0, []
-        progress = st.progress(0, text='Refreshing profiles…')
-        for i, sid in enumerate(list(profiles)):
-            if i:
-                time.sleep(2)
-            try:
-                profiles[sid] = fetch_profile(sid)
-                updated += 1
+            if sid in profiles:
+                st.info('This researcher is already in your collection.')
+            else:
+                profiles[sid] = {
+                    'user_id': sid,
+                    'name': researcher_name.strip() or sid,
+                    'affiliation': '',
+                    'citations': None,
+                    'citations_recent': None,
+                    'h_index': None,
+                    'h_index_recent': None,
+                    'publications': None,
+                    'annual_citations': {},
+                    'profile_url': f'https://scholar.google.com/citations?user={sid}&hl=en',
+                    'fetched_at': None,
+                    'source': 'Not yet retrieved',
+                }
                 st.session_state.dirty = True
+                st.success('Researcher added. Metrics can be refreshed separately.')
+        except ValueError as exc:
+            st.error(str(exc))
+    if profiles:
+        if st.button('Refresh selected researcher', use_container_width=True):
+            # The selected profile picker is initialized later in the same sidebar.
+            sid = st.session_state.get('managed_researcher', next(iter(profiles)))
+            if sid not in profiles:
+                sid = next(iter(profiles))
+            try:
+                with st.spinner('Retrieving Google Scholar metrics…'):
+                    profiles[sid] = fetch_profile(sid)
+                st.session_state.dirty = True
+                st.success(f"Updated {profiles[sid]['name']}")
             except (RuntimeError, requests.RequestException) as exc:
-                errors.append(f"{profiles[sid].get('name', sid)}: {exc}")
-            progress.progress((i + 1) / len(profiles), text=f'{i+1}/{len(profiles)} processed')
-        st.success(f'Refreshed {updated}/{len(profiles)} profiles.')
-        for error in errors:
-            st.warning(error + ' Previous metrics retained.')
+                st.warning(f'{exc} Saved data retained.')
+        if st.button('Refresh all researchers', use_container_width=True):
+            updated, errors = 0, []
+            progress = st.progress(0, text='Refreshing profiles…')
+            for i, sid in enumerate(list(profiles)):
+                if i:
+                    time.sleep(2)
+                try:
+                    profiles[sid] = fetch_profile(sid)
+                    updated += 1
+                    st.session_state.dirty = True
+                except (RuntimeError, requests.RequestException) as exc:
+                    errors.append(f"{profiles[sid].get('name', sid)}: {exc}")
+                    if '429' in str(exc):
+                        st.warning('Google Scholar is rate-limiting requests. Refresh stopped to avoid further requests.')
+                        break
+                progress.progress((i + 1) / len(profiles), text=f'{i+1}/{len(profiles)} processed')
+            st.info(f'Refreshed {updated} researcher(s).')
+            for error in errors:
+                st.warning(error + ' Previous metrics retained.')
     if profiles:
         st.divider()
-        selected = st.selectbox('Manage profile', list(profiles), format_func=lambda sid: profiles[sid].get('name', sid))
+        selected = st.selectbox('Manage profile', list(profiles), format_func=lambda sid: profiles[sid].get('name', sid), key='managed_researcher')
         st.link_button('Open Google Scholar ↗', profiles[selected]['profile_url'], use_container_width=True)
         if st.button('Remove selected researcher', use_container_width=True):
             profiles.pop(selected)
@@ -444,7 +475,7 @@ with profile_tab:
         st.image(badge, width=680)
         st.download_button('Download PNG badge', data=badge,
                            file_name=f"scholar_badge_{chosen}.png", mime='image/png')
-        st.caption(f"Last updated: {profile.get('fetched_at', 'Unknown')}")
+        st.caption(f"Last updated: {profile.get('fetched_at') or 'Not yet refreshed'}")
 
 with st.sidebar.expander('About ScholarScope'):
     st.write('Compare public Google Scholar researcher metrics and export a compact citation badge for an academic website or CV.')
